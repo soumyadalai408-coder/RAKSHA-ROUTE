@@ -77,6 +77,14 @@ const BBSR_SERVICE_AREA = {
   west: 85.72,
 }
 const BBSR_BOUNDS = [[BBSR_SERVICE_AREA.south, BBSR_SERVICE_AREA.west], [BBSR_SERVICE_AREA.north, BBSR_SERVICE_AREA.east]]
+const ODISHA_SERVICE_AREA = {
+  north: 22.65,
+  south: 17.78,
+  east: 87.5,
+  west: 81.35,
+}
+const ODISHA_BOUNDS = [[ODISHA_SERVICE_AREA.south, ODISHA_SERVICE_AREA.west], [ODISHA_SERVICE_AREA.north, ODISHA_SERVICE_AREA.east]]
+const ODISHA_CENTER = [20.3, 84.8]
 const INITIAL_ROUTE_HISTORY = [
   { id: 'RR-DEMO-041', department: 'Emergency Medical Services', from: 'Master Canteen Square, Bhubaneswar', to: 'AIIMS Bhubaneswar', vehicle: 'Ambulance', routeName: 'Recommended route', time: '09:18', distance: '5.8 km', travelTime: '14 min', outcome: 'Completed', incidentSnapshot: ['Janpath Road · Accident · Verified'] },
   { id: 'RR-DEMO-038', department: 'Traffic Police', from: 'Cuttack Railway Station', to: 'SCB Medical College, Cuttack', vehicle: 'Police Vehicle', routeName: 'Alternative 1', time: '08:46', distance: '7.2 km', travelTime: '18 min', outcome: 'Alternative selected', incidentSnapshot: ['Badambadi · Road Blocked · Verified'] },
@@ -335,6 +343,10 @@ function isWithinBhubaneswar(coords) {
   return Boolean(coords && coords[0] >= BBSR_SERVICE_AREA.south && coords[0] <= BBSR_SERVICE_AREA.north && coords[1] >= BBSR_SERVICE_AREA.west && coords[1] <= BBSR_SERVICE_AREA.east)
 }
 
+function isWithinOdisha(coords) {
+  return Boolean(coords && coords[0] >= ODISHA_SERVICE_AREA.south && coords[0] <= ODISHA_SERVICE_AREA.north && coords[1] >= ODISHA_SERVICE_AREA.west && coords[1] <= ODISHA_SERVICE_AREA.east)
+}
+
 function incidentDisplayTitle(incident) {
   return incident.status === 'Cleared' ? 'Road Cleared' : incident.type
 }
@@ -421,9 +433,10 @@ function MapClick({ onPick }) {
   return null
 }
 
-function MapView({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, className = '', zoom = 12, routePlanning = false }) {
+function MapView({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, className = '', zoom = 12, routePlanning = false, mapArea = null }) {
+  const bounds = routePlanning ? BBSR_BOUNDS : mapArea === 'odisha' ? ODISHA_BOUNDS : undefined
   return (
-    <MapContainer center={center ?? LOCATIONS[0].coords} zoom={zoom} minZoom={routePlanning ? 11 : undefined} maxBounds={routePlanning ? BBSR_BOUNDS : undefined} maxBoundsViscosity={routePlanning ? 1 : undefined} scrollWheelZoom className={`leaflet-map ${className}`}>
+    <MapContainer center={center ?? (mapArea === 'odisha' ? ODISHA_CENTER : LOCATIONS[0].coords)} zoom={zoom} minZoom={routePlanning ? 11 : mapArea === 'odisha' ? 7 : undefined} maxBounds={bounds} maxBoundsViscosity={bounds ? 1 : undefined} scrollWheelZoom className={`leaflet-map ${className}`}>
       <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
       <MapResize center={center} />
       {onMapPick && <MapClick onPick={onMapPick} />}
@@ -546,7 +559,7 @@ function AuthorizedVehicleField({ department, vehicle, onChange, options, label 
     : <div className="form-field"><span>{label}</span><div className="input-icon-wrap fixed-vehicle"><Icon size={16} /><strong>{vehicle}</strong></div></div>
 }
 
-function LocationInput({ label, value, onChange, placeholder, onSelection, restrictToBhubaneswar = false, error = '' }) {
+function LocationInput({ label, value, onChange, placeholder, onSelection, restrictToBhubaneswar = false, restrictToOdisha = false, error = '' }) {
   const [focused, setFocused] = useState(false)
   const [suggestions, setSuggestions] = useState([])
   const [searchState, setSearchState] = useState('idle')
@@ -561,19 +574,19 @@ function LocationInput({ label, value, onChange, placeholder, onSelection, restr
       setSearchState('loading')
       try {
         const params = new URLSearchParams({
-          q: restrictToBhubaneswar ? `${value.trim()}, Bhubaneswar, Odisha, India` : value.trim(),
+          q: restrictToBhubaneswar ? `${value.trim()}, Bhubaneswar, Odisha, India` : restrictToOdisha ? `${value.trim()}, Odisha, India` : value.trim(),
           format: 'jsonv2',
           addressdetails: '1',
           limit: '8',
           countrycodes: 'in',
-          ...(restrictToBhubaneswar ? { bounded: '1', viewbox: `${BBSR_SERVICE_AREA.west},${BBSR_SERVICE_AREA.north},${BBSR_SERVICE_AREA.east},${BBSR_SERVICE_AREA.south}` } : {}),
+          ...((restrictToBhubaneswar || restrictToOdisha) ? { bounded: '1', viewbox: `${(restrictToBhubaneswar ? BBSR_SERVICE_AREA : ODISHA_SERVICE_AREA).west},${(restrictToBhubaneswar ? BBSR_SERVICE_AREA : ODISHA_SERVICE_AREA).north},${(restrictToBhubaneswar ? BBSR_SERVICE_AREA : ODISHA_SERVICE_AREA).east},${(restrictToBhubaneswar ? BBSR_SERVICE_AREA : ODISHA_SERVICE_AREA).south}` } : {}),
         })
         const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { signal: controller.signal, headers: { Accept: 'application/json' } })
         if (!response.ok) throw new Error('Location search service unavailable')
         const results = await response.json()
         const nextSuggestions = results
           .map(result => ({ name: result.display_name.split(',').slice(0, 2).join(', '), displayName: result.display_name, coords: [Number(result.lat), Number(result.lon)] }))
-          .filter(result => Number.isFinite(result.coords[0]) && Number.isFinite(result.coords[1]) && (!restrictToBhubaneswar || isWithinBhubaneswar(result.coords)))
+          .filter(result => Number.isFinite(result.coords[0]) && Number.isFinite(result.coords[1]) && (!restrictToBhubaneswar || isWithinBhubaneswar(result.coords)) && (!restrictToOdisha || isWithinOdisha(result.coords)))
         setSuggestions(nextSuggestions)
         setSearchState(nextSuggestions.length ? 'ready' : 'empty')
       } catch (searchError) {
@@ -593,7 +606,7 @@ function LocationInput({ label, value, onChange, placeholder, onSelection, restr
       {focused && <div className="location-suggestions">
         {searchState === 'loading' && <div className="location-search-state">Searching OpenStreetMap…</div>}
         {searchState === 'error' && <div className="location-search-state">Location search is unavailable. Try again.</div>}
-        {searchState === 'empty' && <div className="location-search-state">No matching Bhubaneswar location found.</div>}
+        {searchState === 'empty' && <div className="location-search-state">No matching {restrictToBhubaneswar ? 'Bhubaneswar' : restrictToOdisha ? 'Odisha' : ''} location found.</div>}
         {searchState === 'idle' && <div className="location-search-state">Type an address, landmark or place name.</div>}
         {suggestions.map(location => <button type="button" key={`${location.coords.join(',')}-${location.displayName}`} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(location.name); onSelection?.(location); setFocused(false) }}><MapPin size={14} /><span>{location.name}<small>{location.displayName}</small></span></button>)}
       </div>}
@@ -627,8 +640,8 @@ function MapLegend({ compact = false, emergency = false }) {
   return <div className={`map-legend ${compact ? 'legend-compact' : ''}`}><span><i className="legend-dot red-dot" /> Incident</span><span><i className="legend-dot orange-dot" /> Congestion</span><span><i className="legend-line green-line" /> Recommended</span><span><i className="legend-line blue-line" /> Alternative</span>{emergency && <span><i className="legend-line corridor-line" /> Green corridor</span>}</div>
 }
 
-function MapPanel({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, emergency = false, height = '100%', zoom, routePlanning = false }) {
-  return <div className="map-panel" style={{ height }}><MapView incidents={incidents} center={center} route={route} onIncidentClick={onIncidentClick} onMapPick={onMapPick} mapPick={mapPick} startPoint={startPoint} destinationPoint={destinationPoint} zoom={zoom} routePlanning={routePlanning} /><div className="map-demo-tag"><span className="live-dot" /> {routePlanning ? 'BBSR ROUTE AREA' : 'DEMONSTRATION DATA'}</div><MapLegend emergency={emergency} /></div>
+function MapPanel({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, emergency = false, height = '100%', zoom, routePlanning = false, mapArea = null }) {
+  return <div className="map-panel" style={{ height }}><MapView incidents={incidents} center={center} route={route} onIncidentClick={onIncidentClick} onMapPick={onMapPick} mapPick={mapPick} startPoint={startPoint} destinationPoint={destinationPoint} zoom={zoom} routePlanning={routePlanning} mapArea={mapArea} /><div className="map-demo-tag"><span className="live-dot" /> {routePlanning ? 'BBSR ROUTE AREA' : mapArea === 'odisha' ? 'ODISHA SERVICE AREA' : 'DEMONSTRATION DATA'}</div><MapLegend emergency={emergency} /></div>
 }
 
 function buildRouteOptions(start, end, vehicle, incidents, departureAt, startCoords = coordsFor(start), endCoords = coordsFor(end), drivingRoutes = []) {
@@ -925,10 +938,10 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
   const [busyUntil, setBusyUntil] = useState('')
   const [fileName, setFileName] = useState('')
   const [error, setError] = useState('')
-  const coords = mapPick ?? LOCATIONS.find(place => place.name === location)?.coords
+  const coords = mapPick ?? selectedLocation?.coords ?? LOCATIONS.find(place => place.name === location)?.coords
   async function submit(event) {
     event.preventDefault()
-    if (!location.trim() && !mapPick) { setError('Enter a location or select a point on the map.'); return }
+    if (!location.trim() && !mapPick) { setError('Enter an Odisha location or select a point on the Odisha map.'); return }
     if (!description.trim()) { setError('Add a short description of the road issue.'); return }
     if (isPoliceDepartment(department) && (busyFrom || busyUntil) && (!busyFrom || !busyUntil || new Date(busyUntil) <= new Date(busyFrom))) {
       setError('Choose both busy period dates and make the end time later than the start time.')
@@ -940,7 +953,8 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
     }
     const selected = selectedLocation ?? LOCATIONS.find(place => place.name === location)
     const coords = mapPick ?? selected?.coords
-    if (!coords) { setError('Select a location search result or pin the issue on the map.'); return }
+    if (!coords) { setError('Select an Odisha search result or pin the issue on the Odisha map.'); return }
+    if (!isWithinOdisha(coords)) { setError('The incident location must be inside Odisha.'); return }
     const plannedCondition = isPoliceDepartment(department) && Boolean(busyFrom && busyUntil)
     try {
       await onSubmit({
@@ -975,7 +989,7 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
         <form className="surface-card report-form" onSubmit={submit}>
           <div className="card-title-row"><div><div className="eyebrow muted-eyebrow">INCIDENT DETAILS</div><h2>What is happening?</h2></div><div className="report-form-icon"><AlertTriangle size={18} /></div></div>
           <FieldSelect label="ISSUE CATEGORY" value={type} options={ISSUE_TYPES} onChange={setType} icon={AlertTriangle} />
-          <div className="report-location-wrap"><LocationInput label="LOCATION" value={location} onChange={setLocation} onSelection={setSelectedLocation} placeholder="Enter road, landmark or area..." error={location && !selectedLocation && !mapPick ? 'Select a search result or pin the map.' : ''} /><span className="location-or">OR PIN A LOCATION ON THE MAP <MapPin size={12} /></span></div>
+          <div className="report-location-wrap"><LocationInput label="LOCATION" value={location} onChange={setLocation} onSelection={setSelectedLocation} restrictToOdisha placeholder="Search any Odisha road, landmark or area..." error={location && !selectedLocation && !mapPick ? 'Select an Odisha search result or pin the map.' : ''} /><span className="location-or">OR PIN A LOCATION ON THE ODISHA MAP <MapPin size={12} /></span></div>
           <label className="form-field"><span>ISSUE DESCRIPTION</span><textarea value={description} onChange={event => setDescription(event.target.value)} placeholder="Describe the issue, lane affected, nearby landmark or response needed..." rows={4} maxLength={500} /><small className="char-count">{description.length}/500</small></label>
           <div className="report-form-row">
             <FieldSelect label="SEVERITY" value={severity} options={ISSUE_SEVERITIES} onChange={setSeverity} icon={AlertCircle} />
@@ -996,9 +1010,9 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
         <section className="surface-card report-map-card">
           <div className="section-card-heading"><div><div className="eyebrow muted-eyebrow">INCIDENT LOCATION</div><h2>Select on map</h2></div><div className="map-pick-tag"><LocateFixed size={14} /> {mapPick ? 'PIN PLACED' : 'CLICK TO PIN'}</div></div>
           <p className="report-map-hint">Click on the map to pin the reported issue location. You can also enter a known location in the form.</p>
-          <div className="report-map"><MapPanel incidents={incidents} center={coords ?? LOCATIONS[0].coords} onIncidentClick={() => {}} onMapPick={onMapPick} mapPick={mapPick} height="100%" zoom={11} /></div>
-          <div className="map-picked-location"><MapPin size={15} /><span>{mapPick ? `Pinned location · ${mapPick[0].toFixed(4)}, ${mapPick[1].toFixed(4)}` : location || 'No location selected yet'}</span>{mapPick && <button onClick={() => onMapPick(null)} aria-label="Clear pinned location"><X size={14} /></button>}</div>
-          <div className="report-map-note"><AlertCircle size={14} /> Submitting a report adds it to the incident map and demo route planning.</div>
+          <div className="report-map"><MapPanel incidents={incidents} center={coords ?? ODISHA_CENTER} onIncidentClick={() => {}} onMapPick={onMapPick} mapPick={mapPick} mapArea="odisha" height="100%" zoom={coords ? 11 : 7} /></div>
+          <div className="map-picked-location"><MapPin size={15} /><span>{mapPick ? `Pinned Odisha location · ${mapPick[0].toFixed(4)}, ${mapPick[1].toFixed(4)}` : location || 'No Odisha location selected yet'}</span>{mapPick && <button onClick={() => onMapPick(null)} aria-label="Clear pinned location"><X size={14} /></button>}</div>
+          <div className="report-map-note"><AlertCircle size={14} /> Incident locations are restricted to Odisha. Route planning remains restricted to Bhubaneswar.</div>
         </section>
       </div>
     </div>

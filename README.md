@@ -6,6 +6,7 @@ RAKSHA ROUTE is a React/Vite emergency and transit coordination interface backed
 
 - Route planning accepts only locations selected from the debounced OpenStreetMap Nominatim search results. Typed text is not silently converted to a default location.
 - Route endpoints are validated against the configurable approximate Bhubaneswar service area in `src/App.jsx` (`BBSR_SERVICE_AREA`: 20.17–20.42 N, 85.72–85.93 E). This is an approximate operational rectangle, not an official municipal boundary.
+- Road-issue reporting searches and map pins are restricted to the configurable approximate Odisha service area (`ODISHA_SERVICE_AREA`: 17.78–22.65 N, 81.35–87.50 E). This is an operational bounding rectangle, not an official state boundary.
 - Route geometry, distance, and duration come from the public OSRM driving service. Alternatives are shown only when OSRM returns real road geometry; no straight-line fallback is rendered.
 - Incident-based ranking is illustrative/mock scoring based on the app's stored incident reports. It is not live traffic, verified closure intelligence, or turn-by-turn navigation.
 - The route map is constrained to the Bhubaneswar service area. Other monitoring maps retain their existing Odisha regional views.
