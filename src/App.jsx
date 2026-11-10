@@ -62,8 +62,8 @@ const DEPARTMENT_VEHICLES = {
   Administrator: VEHICLES,
 }
 const DEPARTMENT_PAGES = {
-  'Traffic Police': ['Route Planner', 'Report Road Issue', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
-  'Police Department': ['Route Planner', 'Report Road Issue', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
+  'Traffic Police': ['Route Planner', 'Emergency Vehicles', 'Report Road Issue', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
+  'Police Department': ['Route Planner', 'Emergency Vehicles', 'Report Road Issue', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
   'Emergency Medical Services': ['Emergency Vehicles', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
   'Fire and Disaster Services': ['Emergency Vehicles', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
   'Government Transport Department': ['Public Transport', 'Road Conditions', 'Alerts & Notifications', 'Route History', 'Audit Logs', 'Settings'],
@@ -1121,7 +1121,7 @@ function App() {
     setRouteRequest({ start, end, vehicle })
     navigateTo(
       vehicle === 'Mo Bus' ? 'Public Transport'
-        : profile?.department === 'Emergency Medical Services' || profile?.department === 'Fire and Disaster Services' || profile?.department === 'Administrator' && (vehicle === 'Ambulance' || vehicle === 'Fire Brigade')
+        : vehicle === 'Ambulance' || vehicle === 'Fire Brigade' || vehicle === 'Police Vehicle'
           ? 'Emergency Vehicles'
           : 'Route Planner',
     )
