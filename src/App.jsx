@@ -70,6 +70,13 @@ const DEPARTMENT_PAGES = {
   Administrator: NAV_ITEMS.map(item => item.label),
 }
 const ROUTE_PALETTE = ['#16a675', '#3783ee', '#805fe4']
+const BBSR_SERVICE_AREA = {
+  north: 20.42,
+  south: 20.17,
+  east: 85.93,
+  west: 85.72,
+}
+const BBSR_BOUNDS = [[BBSR_SERVICE_AREA.south, BBSR_SERVICE_AREA.west], [BBSR_SERVICE_AREA.north, BBSR_SERVICE_AREA.east]]
 const INITIAL_ROUTE_HISTORY = [
   { id: 'RR-DEMO-041', department: 'Emergency Medical Services', from: 'Master Canteen Square, Bhubaneswar', to: 'AIIMS Bhubaneswar', vehicle: 'Ambulance', routeName: 'Recommended route', time: '09:18', distance: '5.8 km', travelTime: '14 min', outcome: 'Completed', incidentSnapshot: ['Janpath Road · Accident · Verified'] },
   { id: 'RR-DEMO-038', department: 'Traffic Police', from: 'Cuttack Railway Station', to: 'SCB Medical College, Cuttack', vehicle: 'Police Vehicle', routeName: 'Alternative 1', time: '08:46', distance: '7.2 km', travelTime: '18 min', outcome: 'Alternative selected', incidentSnapshot: ['Badambadi · Road Blocked · Verified'] },
@@ -324,6 +331,10 @@ function coordsFor(name) {
   return LOCATIONS.find(location => location.name === name)?.coords ?? LOCATIONS[0].coords
 }
 
+function isWithinBhubaneswar(coords) {
+  return Boolean(coords && coords[0] >= BBSR_SERVICE_AREA.south && coords[0] <= BBSR_SERVICE_AREA.north && coords[1] >= BBSR_SERVICE_AREA.west && coords[1] <= BBSR_SERVICE_AREA.east)
+}
+
 function incidentDisplayTitle(incident) {
   return incident.status === 'Cleared' ? 'Road Cleared' : incident.type
 }
@@ -347,6 +358,7 @@ function distanceToRouteMeters(point, route) {
 }
 
 async function fetchDrivingRoutes(start, end, avoidPoint = null) {
+  if (!isWithinBhubaneswar(start) || !isWithinBhubaneswar(end)) throw new Error('Both route locations must be inside the Bhubaneswar service area')
   const coordinates = `${start[1]},${start[0]};${end[1]},${end[0]}`
   const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${coordinates}?alternatives=3&steps=true&overview=full&geometries=geojson`)
   if (!response.ok) throw new Error('Driving route service unavailable')
@@ -354,10 +366,15 @@ async function fetchDrivingRoutes(start, end, avoidPoint = null) {
   if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No drivable route found')
   const landRoutes = data.routes
     .filter(route => !route.legs.some(leg => leg.steps.some(step => step.mode === 'ferry' || step.name?.toLowerCase().includes('ferry'))))
-    .map(route => route.geometry.coordinates.map(([longitude, latitude]) => [latitude, longitude]))
+    .map((route, index) => ({
+      index,
+      path: route.geometry.coordinates.map(([longitude, latitude]) => [latitude, longitude]),
+      distanceMeters: route.distance,
+      durationSeconds: route.duration,
+    }))
   if (!landRoutes.length) throw new Error('No land-only driving route found')
   if (!avoidPoint) return landRoutes
-  const alternatives = landRoutes.filter(route => distanceToRouteMeters(avoidPoint, route) > 180)
+  const alternatives = landRoutes.filter(route => distanceToRouteMeters(avoidPoint, route.path) > 180)
   if (!alternatives.length) throw new Error('No alternative land route avoids the affected road')
   return alternatives
 }
@@ -404,9 +421,9 @@ function MapClick({ onPick }) {
   return null
 }
 
-function MapView({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, className = '', zoom = 12 }) {
+function MapView({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, className = '', zoom = 12, routePlanning = false }) {
   return (
-    <MapContainer center={center ?? LOCATIONS[0].coords} zoom={zoom} scrollWheelZoom className={`leaflet-map ${className}`}>
+    <MapContainer center={center ?? LOCATIONS[0].coords} zoom={zoom} minZoom={routePlanning ? 11 : undefined} maxBounds={routePlanning ? BBSR_BOUNDS : undefined} maxBoundsViscosity={routePlanning ? 1 : undefined} scrollWheelZoom className={`leaflet-map ${className}`}>
       <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
       <MapResize center={center} />
       {onMapPick && <MapClick onPick={onMapPick} />}
@@ -529,14 +546,57 @@ function AuthorizedVehicleField({ department, vehicle, onChange, options, label 
     : <div className="form-field"><span>{label}</span><div className="input-icon-wrap fixed-vehicle"><Icon size={16} /><strong>{vehicle}</strong></div></div>
 }
 
-function LocationInput({ label, value, onChange, placeholder }) {
+function LocationInput({ label, value, onChange, placeholder, onSelection, restrictToBhubaneswar = false, error = '' }) {
   const [focused, setFocused] = useState(false)
-  const suggestions = value.trim() ? LOCATIONS.filter(location => location.name.toLowerCase().includes(value.toLowerCase()) || location.city.toLowerCase().includes(value.toLowerCase())).slice(0, 5) : LOCATIONS.slice(0, 4)
+  const [suggestions, setSuggestions] = useState([])
+  const [searchState, setSearchState] = useState('idle')
+  useEffect(() => {
+    if (!focused || !value.trim()) {
+      setSuggestions([])
+      setSearchState('idle')
+      return undefined
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setSearchState('loading')
+      try {
+        const params = new URLSearchParams({
+          q: restrictToBhubaneswar ? `${value.trim()}, Bhubaneswar, Odisha, India` : value.trim(),
+          format: 'jsonv2',
+          addressdetails: '1',
+          limit: '8',
+          countrycodes: 'in',
+          ...(restrictToBhubaneswar ? { bounded: '1', viewbox: `${BBSR_SERVICE_AREA.west},${BBSR_SERVICE_AREA.north},${BBSR_SERVICE_AREA.east},${BBSR_SERVICE_AREA.south}` } : {}),
+        })
+        const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { signal: controller.signal, headers: { Accept: 'application/json' } })
+        if (!response.ok) throw new Error('Location search service unavailable')
+        const results = await response.json()
+        const nextSuggestions = results
+          .map(result => ({ name: result.display_name.split(',').slice(0, 2).join(', '), displayName: result.display_name, coords: [Number(result.lat), Number(result.lon)] }))
+          .filter(result => Number.isFinite(result.coords[0]) && Number.isFinite(result.coords[1]) && (!restrictToBhubaneswar || isWithinBhubaneswar(result.coords)))
+        setSuggestions(nextSuggestions)
+        setSearchState(nextSuggestions.length ? 'ready' : 'empty')
+      } catch (searchError) {
+        if (searchError.name !== 'AbortError') setSearchState('error')
+      }
+    }, 350)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [focused, restrictToBhubaneswar, value])
   return (
     <label className="form-field location-field">
       <span>{label}</span>
-      <div className="input-icon-wrap"><MapPin size={16} /><input value={value} onChange={event => onChange(event.target.value)} onFocus={() => setFocused(true)} onBlur={() => window.setTimeout(() => setFocused(false), 120)} placeholder={placeholder} autoComplete="off" /></div>
-      {focused && <div className="location-suggestions">{(suggestions.length ? suggestions : LOCATIONS.slice(0, 3)).map(location => <button type="button" key={location.name} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(location.name); setFocused(false) }}><MapPin size={14} /><span>{location.name}<small>{location.city}, Odisha</small></span></button>)}</div>}
+      <div className={`input-icon-wrap ${error ? 'input-error' : ''}`}><MapPin size={16} /><input value={value} onChange={event => { onChange(event.target.value); onSelection?.(null) }} onFocus={() => setFocused(true)} onBlur={() => window.setTimeout(() => setFocused(false), 180)} placeholder={placeholder} autoComplete="off" /></div>
+      {error && <small className="field-error">{error}</small>}
+      {focused && <div className="location-suggestions">
+        {searchState === 'loading' && <div className="location-search-state">Searching OpenStreetMap…</div>}
+        {searchState === 'error' && <div className="location-search-state">Location search is unavailable. Try again.</div>}
+        {searchState === 'empty' && <div className="location-search-state">No matching Bhubaneswar location found.</div>}
+        {searchState === 'idle' && <div className="location-search-state">Type an address, landmark or place name.</div>}
+        {suggestions.map(location => <button type="button" key={`${location.coords.join(',')}-${location.displayName}`} onMouseDown={event => event.preventDefault()} onClick={() => { onChange(location.name); onSelection?.(location); setFocused(false) }}><MapPin size={14} /><span>{location.name}<small>{location.displayName}</small></span></button>)}
+      </div>}
     </label>
   )
 }
@@ -567,12 +627,12 @@ function MapLegend({ compact = false, emergency = false }) {
   return <div className={`map-legend ${compact ? 'legend-compact' : ''}`}><span><i className="legend-dot red-dot" /> Incident</span><span><i className="legend-dot orange-dot" /> Congestion</span><span><i className="legend-line green-line" /> Recommended</span><span><i className="legend-line blue-line" /> Alternative</span>{emergency && <span><i className="legend-line corridor-line" /> Green corridor</span>}</div>
 }
 
-function MapPanel({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, emergency = false, height = '100%', zoom }) {
-  return <div className="map-panel" style={{ height }}><MapView incidents={incidents} center={center} route={route} onIncidentClick={onIncidentClick} onMapPick={onMapPick} mapPick={mapPick} startPoint={startPoint} destinationPoint={destinationPoint} zoom={zoom} /><div className="map-demo-tag"><span className="live-dot" /> DEMONSTRATION DATA</div><MapLegend emergency={emergency} /></div>
+function MapPanel({ incidents, center, route, onIncidentClick, onMapPick, mapPick, startPoint, destinationPoint, emergency = false, height = '100%', zoom, routePlanning = false }) {
+  return <div className="map-panel" style={{ height }}><MapView incidents={incidents} center={center} route={route} onIncidentClick={onIncidentClick} onMapPick={onMapPick} mapPick={mapPick} startPoint={startPoint} destinationPoint={destinationPoint} zoom={zoom} routePlanning={routePlanning} /><div className="map-demo-tag"><span className="live-dot" /> {routePlanning ? 'BBSR ROUTE AREA' : 'DEMONSTRATION DATA'}</div><MapLegend emergency={emergency} /></div>
 }
 
 function buildRouteOptions(start, end, vehicle, incidents, departureAt, startCoords = coordsFor(start), endCoords = coordsFor(end), drivingRoutes = []) {
-  const city = LOCATIONS.find(place => place.name === start)?.city
+  const city = 'Bhubaneswar'
   const departure = new Date(departureAt).getTime()
   const arrival = departure + 45 * 60 * 1000
   const relevant = incidents.filter(incident => {
@@ -585,37 +645,38 @@ function buildRouteOptions(start, end, vehicle, incidents, departureAt, startCoo
   const closures = relevant.filter(incident => incident.verification === 'Verified' && incident.clearance === 'Blocked')
   const unresolved = relevant.filter(incident => incident.verification !== 'Verified')
   const plannedConditions = relevant.filter(incident => incident.plannedCondition)
-  const directDistance = haversineDistance(startCoords, endCoords)
-  const scale = Math.max(1, directDistance / 5.8)
   const emergency = vehicle === 'Ambulance' || vehicle === 'Fire Brigade' || vehicle === 'Police Vehicle'
-  const options = [
-    { id: 0, baseDistance: 5.8, baseCongestion: 18, path: 0, turns: 'Via Janpath Rd → Rajpath' },
-    { id: 1, baseDistance: 7.2, baseCongestion: 33, path: 1, turns: 'Via Cuttack Rd → Bapuji Nagar' },
-    { id: 2, baseDistance: 8.4, baseCongestion: 25, path: 2, turns: 'Via Kalpana Square → Old Town' },
-  ].slice(0, drivingRoutes.length)
+  const options = drivingRoutes.map(route => ({
+    id: route.index,
+    distance: route.distanceMeters / 1000,
+    path: route.path,
+    travelMinutes: Math.max(1, Math.ceil(route.durationSeconds / 60)),
+    baseCongestion: [18, 33, 25][route.index] ?? 25,
+    turns: 'Real driving route · OpenStreetMap road network',
+  }))
   const evaluated = options.map(option => {
-    const distance = Math.max(option.baseDistance, directDistance * (option.id === 0 ? 1.1 : option.id === 1 ? 1.28 : 1.43))
-    const plannedExposure = plannedConditions.reduce((total, incident) => total + (incident.severity === 'Critical' ? 100 : incident.severity === 'High' ? 65 : 35) * [1, 0.08, 0.02][option.id], 0)
-    const closureExposure = closures.length * [1, 0.08, 0.02][option.id] + plannedExposure
+    const routeWeight = option.id === 0 ? 1 : option.id === 1 ? 0.22 : 0.08
+    const plannedExposure = plannedConditions.reduce((total, incident) => total + (incident.severity === 'Critical' ? 100 : incident.severity === 'High' ? 65 : 35) * routeWeight, 0)
+    const closureExposure = closures.length * routeWeight + plannedExposure
     const severityRisk = relevant.reduce((total, incident) => {
       const weight = { Critical: 100, High: 72, Medium: 38, Low: 15 }[incident.severity] ?? 30
-      return total + weight * (incident.verification === 'Verified' ? 1 : 0.24) * [1, 0.22, 0.08][option.id]
+      return total + weight * (incident.verification === 'Verified' ? 1 : 0.24) * routeWeight
     }, 0)
     const congestion = Math.min(98, option.baseCongestion + plannedExposure + relevant.filter(incident => !incident.plannedCondition).reduce((total, incident) => {
       const severity = { Critical: 30, High: 22, Medium: 15, Low: 7 }[incident.severity] ?? 12
-      return total + severity * (incident.verification === 'Verified' ? 1 : 0.32) * [1, 0.25, 0.1][option.id]
+      return total + severity * (incident.verification === 'Verified' ? 1 : 0.32) * routeWeight
     }, 0))
     const closureDelay = option.id === 0 ? closures.length * 17 + plannedExposure * 0.25 : 0
-    const travelMinutes = Math.ceil((distance / (emergency ? 27 : 24)) * 60 * (1 + congestion / 165) + closureDelay)
+    const travelMinutes = option.travelMinutes + Math.ceil(closureDelay)
     const incidentRisk = Math.min(100, Math.round(severityRisk + closureExposure * 20))
-    const score = Math.min(100, Math.round(travelMinutes * 1.08 + distance * 1.35 + congestion * 0.24 + incidentRisk * 0.2))
+    const score = Math.min(100, Math.round(travelMinutes * 1.08 + option.distance * 1.35 + congestion * 0.24 + incidentRisk * 0.2))
     const affected = relevant.some(incident => incident.verification === 'Verified') && option.id === 0
     return {
       id: option.id,
       turns: option.turns,
-      path: drivingRoutes[option.id] ?? [],
-      distance: `${distance.toFixed(1)} km`,
-      distanceValue: distance,
+      path: option.path,
+      distance: `${option.distance.toFixed(1)} km`,
+      distanceValue: option.distance,
       time: `${travelMinutes} min`,
       timeValue: travelMinutes,
       congestion: Math.round(congestion),
@@ -669,9 +730,11 @@ function RouteCards({ routes, vehicle, selectedRoute, setSelectedRoute, onStart,
   )
 }
 
-function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, onIncidentClick, mode = 'standard', startValue, endValue, vehicleValue }) {
+function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, onIncidentClick, mode = 'standard', startValue, endValue, startCoords, endCoords, vehicleValue }) {
   const [start, setStart] = useState(startValue ?? LOCATIONS[0].name)
   const [end, setEnd] = useState(endValue ?? LOCATIONS[1].name)
+  const [startLocation, setStartLocation] = useState(() => startCoords ? { name: startValue, coords: startCoords } : LOCATIONS.find(location => location.name === (startValue ?? LOCATIONS[0].name)) ?? null)
+  const [endLocation, setEndLocation] = useState(() => endCoords ? { name: endValue, coords: endCoords } : LOCATIONS.find(location => location.name === (endValue ?? LOCATIONS[1].name)) ?? null)
   const departmentVehicles = vehiclesForDepartment(department)
   const vehicleOptions = mode === 'bus'
     ? department === 'Administrator' ? ['Mo Bus', 'Other Government Vehicle'] : departmentVehicles
@@ -683,6 +746,7 @@ function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, o
   const [vehiclePosition, setVehiclePosition] = useState(null)
   const [drivingRoutes, setDrivingRoutes] = useState([])
   const [routeError, setRouteError] = useState('')
+  const [routing, setRouting] = useState(false)
   const notifiedIncidentIds = useRef(new Set())
   const [serviceId, setServiceId] = useState(mode === 'bus' ? 'MO-217' : '')
   const [selectedRoute, setSelectedRoute] = useState(null)
@@ -691,8 +755,8 @@ function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, o
   const isEmergency = mode === 'emergency'
   const isBus = mode === 'bus'
   const routeDepartureAt = new Date().toISOString()
-  const selectedStart = vehiclePosition ?? coordsFor(start)
-  const selectedEnd = coordsFor(end)
+  const selectedStart = vehiclePosition ?? startLocation?.coords
+  const selectedEnd = endLocation?.coords
   useEffect(() => {
     if (!navigator.geolocation) {
       setRouteError('Vehicle GPS is unavailable. Select a source location to continue.')
@@ -700,8 +764,9 @@ function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, o
     }
     const watchId = navigator.geolocation.watchPosition(
       position => {
-        setVehiclePosition([position.coords.latitude, position.coords.longitude])
-        setRouteError('')
+        const nextPosition = [position.coords.latitude, position.coords.longitude]
+        setVehiclePosition(isWithinBhubaneswar(nextPosition) ? nextPosition : null)
+        if (!isWithinBhubaneswar(nextPosition)) setRouteError('Vehicle GPS is outside the Bhubaneswar service area. Select a Bhubaneswar route origin.')
       },
       () => setRouteError('Vehicle GPS permission is unavailable. Select a source location to continue.'),
       { enableHighAccuracy: true, maximumAge: 10000, timeout: 10000 },
@@ -710,30 +775,37 @@ function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, o
   }, [])
   useEffect(() => {
     let active = true
-    const routeBeforeIncident = drivingRoutes.find((_, index) => index === selectedRoute) ?? drivingRoutes[0] ?? []
+    if (!selectedStart || !selectedEnd || !isWithinBhubaneswar(selectedStart) || !isWithinBhubaneswar(selectedEnd)) {
+      setDrivingRoutes([])
+      setRouting(false)
+      setRouteError(!startLocation || !endLocation ? 'Select a Bhubaneswar search result for both route endpoints.' : 'Both route endpoints must be inside the Bhubaneswar service area.')
+      return undefined
+    }
+    const routeBeforeIncident = drivingRoutes.find(route => route.index === selectedRoute) ?? drivingRoutes[0]
     const affectedIncident = incidents
       .filter(incident => ['Accident', 'Road Blocked', 'Heavy Traffic'].includes(incident.type) && incident.status !== 'Cleared')
-      .find(incident => routeBeforeIncident.length > 1 && distanceToRouteMeters(incident.coords, routeBeforeIncident) <= 180)
+      .find(incident => routeBeforeIncident?.path?.length > 1 && distanceToRouteMeters(incident.coords, routeBeforeIncident.path) <= 180)
     if (affectedIncident && !notifiedIncidentIds.current.has(affectedIncident.id)) {
       notifiedIncidentIds.current.add(affectedIncident.id)
       onNotice?.('ROAD INCIDENT DETECTED', 'ROAD INCIDENT DETECTED – FINDING ALTERNATIVE ROUTE.')
       setSelectedRoute(null)
     }
     setDrivingRoutes([])
+    setRouting(true)
     fetchDrivingRoutes(selectedStart, selectedEnd, affectedIncident?.coords)
       .then(routes => {
         if (!active) return
         setDrivingRoutes(routes)
-        setSelectedRoute(current => current !== null && current < routes.length ? current : null)
+        setSelectedRoute(current => current !== null && routes.some(route => route.index === current) ? current : null)
+        setRouting(false)
         setRouteError('')
         if (affectedIncident) onNotice?.('ALTERNATIVE ROUTE FOUND', 'ALTERNATIVE ROUTE FOUND – NAVIGATION UPDATED.')
       })
-      .catch(error => { if (active) { setDrivingRoutes([]); setRouteError(error.message) } })
+      .catch(error => { if (active) { setDrivingRoutes([]); setRouting(false); setRouteError(error.message) } })
     return () => { active = false }
-  }, [selectedStart[0], selectedStart[1], selectedEnd[0], selectedEnd[1], incidents, selectedRoute])
-  const routeOptions = buildRouteOptions(start, end, vehicle, incidents, routeDepartureAt, selectedStart, selectedEnd, drivingRoutes)
-  const matchingCity = LOCATIONS.find(place => place.name === start)?.city
-  const relatedIncidents = incidents.filter(incident => !matchingCity || incident.city === matchingCity)
+  }, [selectedStart?.[0], selectedStart?.[1], selectedEnd?.[0], selectedEnd?.[1], incidents, selectedRoute, startLocation, endLocation])
+  const routeOptions = buildRouteOptions(start, end, vehicle, incidents, routeDepartureAt, selectedStart ?? BBSR_BOUNDS[0], selectedEnd ?? BBSR_BOUNDS[1], drivingRoutes)
+  const relatedIncidents = incidents.filter(incident => incident.city === 'Bhubaneswar')
   const activeOption = routeOptions.find(option => option.id === selectedRoute) ?? routeOptions[0]
   useEffect(() => {
     setCorridorCoordinated(false)
@@ -755,23 +827,23 @@ function RoutePlanner({ incidents, department, onNotice, onRouteSave, onAudit, o
           <div className="surface-card route-input-card">
             <div className="card-title-row"><div><div className="eyebrow muted-eyebrow">JOURNEY DETAILS</div><h2>{isBus ? 'Plan a service route' : 'Where do you need to go?'}</h2></div><div className="card-title-icon"><RouteIcon size={18} /></div></div>
             <div className="route-location-inputs">
-              <LocationInput label="SOURCE" value={start} onChange={setStart} placeholder="Search starting point..." />
-              <button className="swap-locations" aria-label="Swap source and destination" onClick={() => { setStart(end); setEnd(start) }}><ArrowDown size={15} /></button>
-              <LocationInput label="DESTINATION" value={end} onChange={setEnd} placeholder="Search destination..." />
+              <LocationInput label="SOURCE" value={start} onChange={setStart} onSelection={setStartLocation} restrictToBhubaneswar error={!startLocation ? 'Select a Bhubaneswar result.' : ''} placeholder="Search starting point..." />
+              <button className="swap-locations" aria-label="Swap source and destination" onClick={() => { setStart(end); setEnd(start); setStartLocation(endLocation); setEndLocation(startLocation) }}><ArrowDown size={15} /></button>
+              <LocationInput label="DESTINATION" value={end} onChange={setEnd} onSelection={setEndLocation} restrictToBhubaneswar error={!endLocation ? 'Select a Bhubaneswar result.' : ''} placeholder="Search destination..." />
             </div>
             <div className="planner-form-row"><AuthorizedVehicleField department={department} vehicle={vehicle} options={vehicleOptions} onChange={setVehicle} label={isBus ? 'AUTHORIZED SERVICE' : 'AUTHORIZED VEHICLE'} /><label className="form-field"><span>{isBus ? 'SERVICE ID' : 'VEHICLE / SERVICE ID'} <i>OPTIONAL</i></span><div className="input-icon-wrap"><Radio size={15} /><input value={serviceId} onChange={event => setServiceId(event.target.value)} placeholder={isBus ? 'e.g. MO-217' : 'e.g. AMB-042'} /></div></label></div>
-            <button className="primary-button find-routes-button" onClick={() => { setSelectedRoute(routeOptions[0]?.id ?? 0); setDetail({ title: 'Routes compared', message: `Three routes scored for time, distance, congestion and incident exposure. Estimates use mock data.` }) }}><Search size={16} /> Compare & find best routes</button>
+            <button className="primary-button find-routes-button" disabled={routing || !startLocation || !endLocation} onClick={() => { setSelectedRoute(routeOptions[0]?.id ?? 0); setDetail({ title: 'Road routes compared', message: 'Returned driving routes were ranked by actual OSRM distance and duration. Incident risk is illustrative only.' }) }}><Search size={16} /> Compare & find best routes</button>
           </div>
-          <div className="route-results-heading"><div><div className="eyebrow muted-eyebrow">LIVE ROAD ROUTING · OSRM</div><h2>{isBus ? 'Assigned route & alternatives' : 'Recommended routes'}</h2></div><span className="route-updated"><span className="live-dot" /> ROAD NETWORK DATA</span></div>
+          <div className="route-results-heading"><div><div className="eyebrow muted-eyebrow">LIVE ROAD ROUTING · OSRM · ILLUSTRATIVE INCIDENT SCORING</div><h2>{isBus ? 'Assigned route & alternatives' : 'Recommended routes'}</h2></div><span className="route-updated"><span className="live-dot" /> {routing ? 'SEARCHING ROAD NETWORK' : 'ROAD NETWORK DATA'}</span></div>
           <RouteCards routes={routeOptions} vehicle={vehicle} selectedRoute={selectedRoute ?? routeOptions[0]?.id} setSelectedRoute={setSelectedRoute} onStart={option => { onRouteSave?.({ from: start, to: end, vehicle, serviceId, departureAt: routeDepartureAt, ...option }); setDetail({ title: 'Navigation selected', message: `${option.name} is selected for your ${vehicle.toLowerCase()} route at ${new Date(routeDepartureAt).toLocaleString()}.` }) }} priority={isEmergency} />
           {isEmergency && <section className="green-corridor-card"><div className="green-corridor-head"><div className="corridor-icon"><Radio size={16} /></div><div><strong>Emergency green corridor</strong><small>Police-coordinated traffic clearance points along the recommended route</small></div><span className="corridor-demo-tag">COORDINATION DEMO</span></div><div className="corridor-checkpoints"><span><i>01</i>{start.split(',')[0]}</span><ArrowRight size={13} /><span><i>02</i>Mid-route traffic post</span><ArrowRight size={13} /><span><i>03</i>{end.split(',')[0]}</span></div><button className={`corridor-action ${corridorCoordinated ? 'corridor-action-done' : ''}`} onClick={() => { const nextState = !corridorCoordinated; setCorridorCoordinated(nextState); onAudit?.(nextState ? 'Green corridor coordination requested' : 'Green corridor coordination withdrawn', `${vehicle} · ${start.split(',')[0]} to ${end.split(',')[0]}`); onNotice?.(nextState ? 'Coordination request recorded' : 'Coordination request withdrawn', 'This local demo does not contact dispatch or traffic officers.') }}>{corridorCoordinated ? <CheckCircle2 size={14} /> : <Zap size={14} />}{corridorCoordinated ? 'Coordination requested' : 'Request police coordination'}</button><p>Demo only · No live signal control, dispatch or officer notification.</p></section>}
           {isBus && <div className="surface-card arrival-card"><div className="arrival-icon"><Bus size={18} /></div><div><span>ESTIMATED ARRIVAL</span><strong>09:42 AM</strong></div><div className="arrival-separator" /><div><span>ROUTE CHANGE</span><strong className="arrival-update"><Activity size={14} /> No changes</strong></div></div>}
           {detail && <div className="inline-success"><CheckCircle2 size={17} /><span><strong>{detail.title}</strong><small>{detail.message}</small></span><button onClick={() => setDetail(null)} aria-label="Dismiss"><X size={15} /></button></div>}
         </section>
         <section className="planner-map-column">
-          <div className="planner-map-heading"><div><div className="eyebrow muted-eyebrow">ROUTE VISUALIZATION</div><h2>{LOCATIONS.find(place => place.name === start)?.city ?? 'Odisha'} network</h2></div><button className="map-layer-button"><SlidersHorizontal size={15} /> Layers</button></div>
-          <div className="planner-map"><MapPanel incidents={mapIncidents} center={selectedStart} route={route} startPoint={selectedStart} destinationPoint={selectedEnd} onIncidentClick={onIncidentClick} emergency={isEmergency} height="100%" zoom={12} /></div>
-          <div className={`route-safety-note ${routeError ? 'route-safety-error' : ''}`}><Shield size={13} /> {routeError || 'START → DESTINATION · Driving routes only · One-way roads respected'}</div>
+          <div className="planner-map-heading"><div><div className="eyebrow muted-eyebrow">ROUTE VISUALIZATION</div><h2>Bhubaneswar road network</h2></div><button className="map-layer-button"><SlidersHorizontal size={15} /> Layers</button></div>
+          <div className="planner-map"><MapPanel incidents={mapIncidents} center={selectedStart ?? LOCATIONS[0].coords} route={route} startPoint={selectedStart} destinationPoint={selectedEnd} onIncidentClick={onIncidentClick} emergency={isEmergency} routePlanning height="100%" zoom={12} /></div>
+          <div className={`route-safety-note ${routeError ? 'route-safety-error' : ''}`}><Shield size={13} /> {routeError || 'START → DESTINATION · Driving routes only · One-way roads respected · Estimates are not live traffic or turn-by-turn navigation'}</div>
           {isEmergency && <div className="corridor-map-key"><i /> Green dashed overlay identifies the recommended clearance corridor.</div>}
           <div className="route-map-summary"><span><MapPin size={14} />{start.split(',')[0]}</span><span className="route-map-dash" /><span><MapPin size={14} />{end.split(',')[0]}</span></div>
           {isBus && <div className="bus-update-note"><Bell size={15} /><span><strong>Route status</strong> · No active closures on this service route.</span></div>}
@@ -793,6 +865,8 @@ function EmergencyReference({ online, lastRoute, lastOnlineAt }) {
 function Dashboard({ incidents, department, onNavigate, onQuickRoute, onIncidentClick, online, lastRoute, lastOnlineAt }) {
   const [start, setStart] = useState(LOCATIONS[0].name)
   const [end, setEnd] = useState(LOCATIONS[1].name)
+  const [startLocation, setStartLocation] = useState(LOCATIONS[0])
+  const [endLocation, setEndLocation] = useState(LOCATIONS[1])
   const vehicleOptions = vehiclesForDepartment(department)
   const canReportIssue = pagesForDepartment(department).includes('Report Road Issue')
   const [vehicle, setVehicle] = useState(vehicleOptions[0])
@@ -817,11 +891,11 @@ function Dashboard({ incidents, department, onNavigate, onQuickRoute, onIncident
         <section className="surface-card dashboard-planner-card">
           <div className="section-card-heading"><div><div className="eyebrow muted-eyebrow">QUICK ROUTE</div><h2>Plan a journey</h2></div><div className="quick-route-icon"><Navigation size={17} /></div></div>
           <div className="quick-route-fields">
-            <LocationInput label="FROM" value={start} onChange={setStart} placeholder="Starting point" />
-            <LocationInput label="TO" value={end} onChange={setEnd} placeholder="Destination" />
+            <LocationInput label="FROM" value={start} onChange={setStart} onSelection={setStartLocation} restrictToBhubaneswar error={!startLocation ? 'Select a Bhubaneswar result.' : ''} placeholder="Starting point" />
+            <LocationInput label="TO" value={end} onChange={setEnd} onSelection={setEndLocation} restrictToBhubaneswar error={!endLocation ? 'Select a Bhubaneswar result.' : ''} placeholder="Destination" />
             <AuthorizedVehicleField department={department} vehicle={vehicle} options={vehicleOptions} onChange={setVehicle} />
           </div>
-          <button className="primary-button quick-plan-button" onClick={() => onQuickRoute(start, end, vehicle)}><RouteIcon size={16} /> View route options <ArrowRight size={15} /></button>
+          <button className="primary-button quick-plan-button" disabled={!startLocation || !endLocation} onClick={() => onQuickRoute(start, end, vehicle, startLocation, endLocation)}><RouteIcon size={16} /> View route options <ArrowRight size={15} /></button>
           <div className="quick-route-footer"><Shield size={13} /> Emergency vehicles receive priority recommendations</div>
         </section>
         <section className="surface-card dashboard-incidents-card">
@@ -843,6 +917,7 @@ function Dashboard({ incidents, department, onNavigate, onQuickRoute, onIncident
 function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCancel, actor }) {
   const [type, setType] = useState(ISSUE_TYPES[0])
   const [location, setLocation] = useState('')
+  const [selectedLocation, setSelectedLocation] = useState(null)
   const [severity, setSeverity] = useState('Medium')
   const [duration, setDuration] = useState('1–2 hours')
   const [description, setDescription] = useState('')
@@ -863,8 +938,9 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
       setError('The expected busy period must start now or in the future.')
       return
     }
-    const selected = LOCATIONS.find(place => place.name === location)
-    const coords = mapPick ?? selected?.coords ?? LOCATIONS[0].coords
+    const selected = selectedLocation ?? LOCATIONS.find(place => place.name === location)
+    const coords = mapPick ?? selected?.coords
+    if (!coords) { setError('Select a location search result or pin the issue on the map.'); return }
     const plannedCondition = isPoliceDepartment(department) && Boolean(busyFrom && busyUntil)
     try {
       await onSubmit({
@@ -899,7 +975,7 @@ function ReportIssue({ onSubmit, incidents, department, onMapPick, mapPick, onCa
         <form className="surface-card report-form" onSubmit={submit}>
           <div className="card-title-row"><div><div className="eyebrow muted-eyebrow">INCIDENT DETAILS</div><h2>What is happening?</h2></div><div className="report-form-icon"><AlertTriangle size={18} /></div></div>
           <FieldSelect label="ISSUE CATEGORY" value={type} options={ISSUE_TYPES} onChange={setType} icon={AlertTriangle} />
-          <div className="report-location-wrap"><LocationInput label="LOCATION" value={location} onChange={setLocation} placeholder="Enter road, landmark or area..." /><span className="location-or">OR PIN A LOCATION ON THE MAP <MapPin size={12} /></span></div>
+          <div className="report-location-wrap"><LocationInput label="LOCATION" value={location} onChange={setLocation} onSelection={setSelectedLocation} placeholder="Enter road, landmark or area..." error={location && !selectedLocation && !mapPick ? 'Select a search result or pin the map.' : ''} /><span className="location-or">OR PIN A LOCATION ON THE MAP <MapPin size={12} /></span></div>
           <label className="form-field"><span>ISSUE DESCRIPTION</span><textarea value={description} onChange={event => setDescription(event.target.value)} placeholder="Describe the issue, lane affected, nearby landmark or response needed..." rows={4} maxLength={500} /><small className="char-count">{description.length}/500</small></label>
           <div className="report-form-row">
             <FieldSelect label="SEVERITY" value={severity} options={ISSUE_SEVERITIES} onChange={setSeverity} icon={AlertCircle} />
@@ -1117,8 +1193,8 @@ function App() {
       setMobileMenuOpen(false)
       setMapPick(null)
   }
-  function openQuickRoute(start, end, vehicle) {
-    setRouteRequest({ start, end, vehicle })
+  function openQuickRoute(start, end, vehicle, startLocation, endLocation) {
+    setRouteRequest({ start, end, vehicle, startCoords: startLocation?.coords, endCoords: endLocation?.coords })
     navigateTo(
       vehicle === 'Mo Bus' ? 'Public Transport'
         : vehicle === 'Ambulance' || vehicle === 'Fire Brigade' || vehicle === 'Police Vehicle'
@@ -1222,9 +1298,9 @@ function App() {
   const visibleNavItems = NAV_ITEMS.filter(item => allowedPages.includes(item.label))
   let pageBody
   if (activePage === 'Dashboard') pageBody = <Dashboard incidents={incidents} department={department} onNavigate={navigateTo} onQuickRoute={openQuickRoute} onIncidentClick={setSelectedIncident} online={online} lastRoute={lastRoute} lastOnlineAt={lastOnlineAt} />
-  else if (activePage === 'Route Planner') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="standard" startValue={routeRequest?.start} endValue={routeRequest?.end} vehicleValue={routeRequest?.vehicle} />
-  else if (activePage === 'Emergency Vehicles') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="emergency" startValue={routeRequest?.start} endValue={routeRequest?.end} vehicleValue={routeRequest?.vehicle} />
-  else if (activePage === 'Public Transport') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="bus" startValue={routeRequest?.start} endValue={routeRequest?.end} vehicleValue={routeRequest?.vehicle} />
+  else if (activePage === 'Route Planner') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="standard" startValue={routeRequest?.start} endValue={routeRequest?.end} startCoords={routeRequest?.startCoords} endCoords={routeRequest?.endCoords} vehicleValue={routeRequest?.vehicle} />
+  else if (activePage === 'Emergency Vehicles') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="emergency" startValue={routeRequest?.start} endValue={routeRequest?.end} startCoords={routeRequest?.startCoords} endCoords={routeRequest?.endCoords} vehicleValue={routeRequest?.vehicle} />
+  else if (activePage === 'Public Transport') pageBody = <RoutePlanner key={activePage} incidents={incidents} department={department} onNotice={showNotice} onAudit={recordAudit} onRouteSave={saveRoute} onIncidentClick={setSelectedIncident} mode="bus" startValue={routeRequest?.start} endValue={routeRequest?.end} startCoords={routeRequest?.startCoords} endCoords={routeRequest?.endCoords} vehicleValue={routeRequest?.vehicle} />
   else if (activePage === 'Report Road Issue') pageBody = <ReportIssue incidents={incidents} department={department} onSubmit={addIncident} onMapPick={setMapPick} mapPick={mapPick} actor={profile?.officialId || 'DEMO-OFFICER'} onCancel={() => navigateTo('Dashboard')} />
   else if (activePage === 'Road Conditions') pageBody = <RoadConditions incidents={incidents} onIncidentClick={setSelectedIncident} />
   else if (activePage === 'Alerts & Notifications') pageBody = <AlertsPage incidents={incidents} connectedDevices={connectedDevices} notifications={notifications} onIncidentClick={setSelectedIncident} onMarkRead={() => { setUnreadCount(0); showNotice('Alerts reviewed', 'All displayed realtime alerts are marked as reviewed.') }} />

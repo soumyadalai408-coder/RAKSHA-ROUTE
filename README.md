@@ -2,6 +2,16 @@
 
 RAKSHA ROUTE is a React/Vite emergency and transit coordination interface backed by FastAPI, SQLAlchemy, SQLite, and WebSockets.
 
+## Bhubaneswar route planning
+
+- Route planning accepts only locations selected from the debounced OpenStreetMap Nominatim search results. Typed text is not silently converted to a default location.
+- Route endpoints are validated against the configurable approximate Bhubaneswar service area in `src/App.jsx` (`BBSR_SERVICE_AREA`: 20.17–20.42 N, 85.72–85.93 E). This is an approximate operational rectangle, not an official municipal boundary.
+- Route geometry, distance, and duration come from the public OSRM driving service. Alternatives are shown only when OSRM returns real road geometry; no straight-line fallback is rendered.
+- Incident-based ranking is illustrative/mock scoring based on the app's stored incident reports. It is not live traffic, verified closure intelligence, or turn-by-turn navigation.
+- The route map is constrained to the Bhubaneswar service area. Other monitoring maps retain their existing Odisha regional views.
+- OpenStreetMap/Nominatim and OSRM are public services with usage limits and availability constraints. Typed search text and coordinates are sent to those providers; do not enter sensitive personal information. Review provider policies and configure a production geocoder/router for deployment-scale traffic.
+- OpenStreetMap attribution remains visible on the Leaflet map.
+
 ## Windows 11 LAN setup
 
 1. Install Node.js 20+ and Python 3.11+.
@@ -53,3 +63,5 @@ python -m py_compile .\backend\main.py
 ```
 
 To test multiple clients, open the LAN URL on two devices, report a `Road Blocked` incident on one, and confirm the red alert, unread count, browser notification, sound, and map marker appear on the other without refresh. Clear it from either device and confirm the update propagates.
+
+For route planning, test a recognized Bhubaneswar place (for example, `Master Canteen Square`), an unknown query, an out-of-area query such as `Mumbai`, and a temporary geocoder/router failure. Select both valid suggestions and confirm the OSRM road geometry, actual distance, duration, endpoint markers, and returned alternatives appear without fabricated estimates.
